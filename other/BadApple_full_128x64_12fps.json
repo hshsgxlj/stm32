@@ -1,0 +1,12 @@
+{
+  "width": 128,
+  "height": 64,
+  "fps": 12,
+  "duration_seconds": 219.08333333333334,
+  "frame_count": 2629,
+  "bytes_per_frame": 1024,
+  "source_duration_seconds": 219.09900000000002,
+  "source_video": "C:\\Users\\hshsgxlj\\Desktop\\2024电赛小车\\stm32\\stm32\\other\\badapple.mp4",
+  "host_playback_loop": true,
+  "byte_order": "SSD1306 page order, vertical LSB first"
+}
