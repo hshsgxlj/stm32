@@ -50,14 +50,22 @@
 /* 线尾确认时间(任务2 的 C/A 点、任务3/4 的弧线结束):全白持续
  * 此时间才判定"黑线走完"。传感器间隙的短暂全白不会误触发;
  * 判得太慢可调小。 */
-#define H_COURSE_TASK2_EDGE_CONFIRM_MS   350U
+#define H_COURSE_TASK2_EDGE_CONFIRM_MS   450U
+
+/* 弯道至少前进这段距离后才允许用“持续全白”判断 C/A 线尾。
+ * 防止刚离开 B/D 横线或传感器短暂跨过线缝时提前切换阶段。 */
+#define H_COURSE_TASK2_EDGE_MIN_MM        350.0f
+
+/* 任务2弯道出线时,全白间隙内保持最后一次差速,避免提前切回上一段
+ * 直线的航向保持而把车头拉回旧方向。 */
+#define H_COURSE_TASK2_EDGE_HOLD_MS      H_COURSE_TASK2_EDGE_CONFIRM_MS
 
 /* 任务4:任务2 的路线连续行驶的圈数。 */
 #define H_COURSE_TASK4_LAPS              4U
 
 /* 任务2 第二个直线(C-D)方向补偿(度×10,正 yaw = 左转):
  * 过第一个弯道(B-C)后左偏 → 负值(往右);右偏 → 正值。 */
-#define H_COURSE_TASK2_CD_TRIM_X10       -80
+#define H_COURSE_TASK2_CD_TRIM_X10       10
 
 /* 蜂鸣器(和 LED)每次响铃/点亮的时长。 */
 #define H_COURSE_BUZZER_BEEP_MS          100U
@@ -109,6 +117,12 @@
 #define H_COURSE_LINE_RECOVER_BRAKE_MS    80U
 #define H_COURSE_LINE_RECOVER_EXIT_MS     30U
 
+/* 任务3/4弯道入口专用:最外侧 P1/P4 刚压黑时更快打方向。
+ * 只影响任务3/4,任务2仍使用上面的通用参数。 */
+#define H_COURSE_TASK34_RECOVER_DIFF      85
+#define H_COURSE_TASK34_RECOVER_SPEED_PCT 70
+#define H_COURSE_TASK34_RECOVER_BRAKE_MS  10U
+
 /* 恢复模式下全白(线在传感器间隙/刚脱离最外侧)时,继续按恢复方向
  * 缓慢漂移找线的最长时间;超过则放弃恢复转常规丢线处理。 */
 #define H_COURSE_LINE_RECOVER_WHITE_MS    1500U
@@ -149,15 +163,15 @@
 
 /* 斜线几何:长度和与出发方向(AB)的夹角(实车标定)。 */
 #define H_COURSE_TASK3_DIAG_MM            1280.6f   /* sqrt(1000²+800²) */
-#define H_COURSE_TASK3_DIAG_ANGLE_X10     350       /* 实车标定:38.66° 偏大,先收 35° */
+#define H_COURSE_TASK3_DIAG_ANGLE_X10     350       /* 当前任务标定值:35° */
 
-/* BD 斜线方向补偿(度×10,正 yaw = 左转):B-D 转向结果左偏 →
- * 往右补(减小或负值);右偏 → 增大。只作用于 BD 转向和斜线保持。 */
-#define H_COURSE_TASK3_BD_TRIM_X10       -50
+/* BD 斜线方向补偿(度×10,正 yaw = 左转)。保留原始 -3°微调;
+ * B 点的 180°反向由 h_course.c 中的 170°目标项单独调节。 */
+#define H_COURSE_TASK3_BD_TRIM_X10       -30
 
 /* AC 斜线方向补偿(度×10,正 yaw = 左转):A-C 转向/斜线左偏 →
  * 往右补(负值);右偏 → 正值。只作用于 AC 转向和斜线保持。 */
-#define H_COURSE_TASK3_AC_TRIM_X10       -20
+#define H_COURSE_TASK3_AC_TRIM_X10       -10
 
 /* 轮子周长(mm/圈),用于编码器计距。
  * 实车标定:编码器计 1000mm 实际跑 1090mm → 204.2 × 1.09 ≈ 222.6 */
@@ -167,34 +181,51 @@
  * 转向单轮速度大 → 惯性大 → 容易转过窗口;角度偏大就先降它。 */
 #define H_COURSE_TASK3_DIAG_PWM           155
 #define H_COURSE_TASK3_ARC_PWM            145
-#define H_COURSE_TASK3_TURN_PWM           70
+#define H_COURSE_TASK3_TURN_PWM           110
+#define H_COURSE_TASK3_TURN_FINE_PWM      75
 #define H_COURSE_TASK3_CAPTURE_PWM        60
+
+/* 任务4 的第二个弯需要更大的单轮启动力;只作用于任务4,不改变任务3。 */
+#define H_COURSE_TASK4_TURN_PWM           110
+#define H_COURSE_TASK4_ALIGN_TIMEOUT_MS   6000U
+#define H_COURSE_TASK4_RESCUE_PWM         80
+
+/* 任务3/4 B点出弯、驶离黑线后的最终车头目标(相对启动方向,度×10)。
+ * 只作用于出弯摆正阶段,不改变 B-D 斜线的几何航向目标。 */
+#define H_COURSE_TASK34_B_EXIT_TARGET_X10 -1750
 
 /* 距离窗口:斜线末尾 ±ENTRY 内允许捕捉线头;跑出窗口即判故障。 */
 #define H_COURSE_TASK3_ENTRY_WINDOW_MM    120.0f
+
+/* 任务4专用:斜线超过预计长度多少毫米后进入救援摆正。
+ * 数值越小,越早摆正;建议从 20mm 开始现场调整。 */
+#define H_COURSE_TASK4_RESCUE_TRIGGER_MM  -40.0f
 
 /* 角度容差(度×10):转向到位 3°,斜线航向 20°。 */
 #define H_COURSE_TASK3_ALIGN_TOL_X10      30
 #define H_COURSE_TASK3_DIAG_TOL_X10       200
 
+/* 航向误差必须连续超限才报 E3，过滤单次陀螺仪跳变和阶段切换瞬态。 */
+#define H_COURSE_TASK3_HEADING_FAULT_MS   250U
+
 /* 时序:确认去抖、顶点制动后静止判据(轮速 RPM)、各阶段超时。 */
 #define H_COURSE_TASK3_DEBOUNCE_MS        30U
 #define H_COURSE_TASK3_SETTLE_MS          200U
 #define H_COURSE_TASK3_SETTLE_RPM         3
-#define H_COURSE_TASK3_ALIGN_TIMEOUT_MS   4000U
+#define H_COURSE_TASK3_ALIGN_TIMEOUT_MS   6000U
 #define H_COURSE_TASK3_CAPTURE_TIMEOUT_MS 2000U
 
 /* ================================================================
  * 七、直线控制：陀螺仪航向保持或左右编码器转速同步
  * ================================================================ */
 
-/* 直行段:左轮固定 PWM(基准),右轮用 PID 跟踪左轮实际转速。
- * 两个 PWM 常量是右轮修正的基准值。 */
+/* 直行段:MOTOR_A(物理右轮)固定 PWM(基准),MOTOR_B(物理左轮)
+ * 用 PID 跟踪右轮实际转速。两个 PWM 常量是 B 轮修正的基准值。 */
 #define H_COURSE_STRAIGHT_PWM_LEFT       155
 #define H_COURSE_STRAIGHT_PWM_RIGHT      155
 
-/* 右轮同步 PID(误差 = 左轮实际转速 + 补偿 − 右轮实际转速,单位 RPM):
- * KP:每 1 RPM 差给多少 PWM;KI:消除持续偏差(左右轮阻力差异)。
+/* 左轮同步 PID(误差 = 右轮(A)实际转速 + 补偿 − 左轮(B)实际转速,
+ * 单位 RPM):KP:每 1 RPM 差给多少 PWM;KI:消除持续偏差(左右轮阻力差异)。
  * 同步后左右轮转速一致,车走直线。 */
 #define H_COURSE_SYNC_KP                 2.0f
 #define H_COURSE_SYNC_KI                 0.5f
@@ -202,8 +233,8 @@
 #define H_COURSE_SYNC_INTEGRAL_LIMIT     30.0f
 #define H_COURSE_SYNC_LIMIT              80
 
-/* 轮径差补偿:右轮的目标转速 = 左轮 + 此值(RPM)。
- * 车右偏 → 调大(右轮跑更快);车左偏 → 调小或填负值。 */
+/* 轮径差补偿:左轮(B)的目标转速 = 右轮(A) + 此值(RPM)。
+ * 车右偏 → 调大(左轮跑更快);车左偏 → 调小或填负值。 */
 #define H_COURSE_SYNC_RPM_TRIM           0.3f
 
 /* 串口调试开关:1=打开(115200 打印传感器/转速/PWM,用串口助手看),

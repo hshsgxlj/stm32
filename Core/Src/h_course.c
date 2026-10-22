@@ -3,7 +3,6 @@
 #include "led.h"
 #include "motor.h"
 #include "mpu6050.h"
-#include "mpu6050_dmp.h"
 #include "oled.h"
 #include "track.h"
 
@@ -57,13 +56,17 @@ static uint32_t course_node_candidate_tick;
 static uint32_t course_lost_line_tick;
 static uint32_t course_last_debug_tick;
 static uint32_t task2_edge_candidate_tick;
+static uint8_t task2_curve_line_seen;
+static float task2_curve_start_mm;
 static uint32_t buzzer_off_tick;
 static HCourse_Task3Phase task3_phase;
 static uint32_t task3_phase_tick;
 static uint32_t task3_edge_tick;          /* 通用去抖计时 */
+static uint32_t task3_heading_bad_tick;   /* 航向连续超限计时 */
 static uint8_t task3_leg;                 /* 0=AC, 1=CB, 2=BD, 3=DA */
 static float task3_distance_mm;           /* 编码器累计距离 */
 static float task3_leg_start_mm;
+static int16_t task2_start_heading_x10;   /* 任务2启动时的全局 AB 航向 */
 static int16_t task3_start_heading_x10;   /* 出发基准(=AB 方向-α,AC 即此值) */
 static int16_t task3_turn_target_x10;
 
@@ -71,7 +74,8 @@ static float line_integral;
 static float line_previous_error;
 static float line_last_error;
 static uint8_t task4_lap;   /* 任务4 当前圈数(1..4) */
-static uint8_t task3_diag_rescue;   /* 任务4 斜线救援模式:超距未压线,持续直行找线 */
+/* 任务4斜线救援状态:0=正常,1=先摆正到末端切线方向,2=摆正后直行找线 */
+static uint8_t task3_diag_rescue;
 static uint8_t dist_test_active;    /* 距离标定测试模式 */
 static uint8_t dist_test_running;
 static float dist_test_target_mm;
@@ -89,6 +93,7 @@ static uint32_t yaw_last_ok_tick;
 static char task4_imu_failure;  /* I=初始化,C=校准,R=读取 */
 static int16_t current_yaw_x10;
 static int16_t target_yaw_x10;
+static int16_t task_start_yaw_x10;
 static int16_t last_yaw_correction;
 static float yaw_integral;
 static float yaw_previous_error;
@@ -99,6 +104,7 @@ static int16_t last_right_pwm;
 static void buzzer_set(uint8_t on);
 static void control_line(uint32_t now, uint8_t blacks,
                          int16_t base_left, int16_t base_right);
+static uint8_t task3_line_valid(void);
 
 static void buzzer_init(void)
 {
@@ -174,12 +180,22 @@ static int16_t yaw_error_x10(int16_t target, int16_t current)
     return (int16_t)error;
 }
 
+#if H_COURSE_DEBUG
 static int16_t yaw_relative_x10(void)
 {
     /* The DMP yaw is an arbitrary absolute heading.  Only the change from
      * the stationary launch heading is useful for straight-line control. */
     if (yaw_ready == 0U) return 0;
     return yaw_error_x10(current_yaw_x10, target_yaw_x10);
+}
+#endif
+
+static int16_t task_start_yaw_relative_x10(void)
+{
+    /* OLED 显示使用任务启动时的航向作为唯一零点。节点、阶段和任务4
+     * 换圈只更新控制目标，不改变这个显示基准。 */
+    if (yaw_ready == 0U) return 0;
+    return yaw_error_x10(current_yaw_x10, task_start_yaw_x10);
 }
 
 static uint8_t black_count(const TRACK_StateTypeDef *track)
@@ -216,7 +232,7 @@ static int16_t yaw_hold_correction(void)
     float derivative = error - yaw_previous_error;
     float correction;
 
-    if (yaw_ready == 0U) {
+    if ((yaw_ready == 0U) || (yaw_sample_valid == 0U)) {
         last_yaw_correction = 0;
         return 0;
     }
@@ -240,6 +256,9 @@ static void apply_yaw_hold_pair(int16_t left_speed, int16_t right_speed)
 {
     int16_t correction = yaw_hold_correction();
 
+    /* 统一约定:MOTOR_A=物理右轮、MOTOR_B=物理左轮(交叉接线),
+     * 正 yaw=左转。目标在左侧(error>0,需左转)时右轮(MOTOR_A)
+     * 加速、左轮(MOTOR_B)减速。 */
     last_left_pwm = clamp_speed((int32_t)left_speed + (int32_t)correction);
     last_right_pwm = clamp_speed((int32_t)right_speed - (int32_t)correction);
     MOTOR_SetSpeeds(last_left_pwm, last_right_pwm);
@@ -256,6 +275,10 @@ static void yaw_retarget(void)
     line_integral = 0.0f;
     line_previous_error = 0.0f;
     line_last_error = 0.0f;
+    course_lost_line_tick = 0U;
+    line_recover_dir = 0;
+    line_recover_exit_tick = 0U;
+    line_recover_white_tick = 0U;
 }
 
 static uint8_t update_node_detector(uint32_t now, uint8_t blacks)
@@ -297,6 +320,18 @@ static uint8_t update_node_detector(uint32_t now, uint8_t blacks)
 static uint8_t task2_all_white_event(uint32_t now, uint8_t blacks)
 {
     if (blacks != 0U) {
+        /* 全黑通常仍是 B/D 横线；只有 1~3 路连续压黑才说明已经
+         * 真正捕捉到弯道引导线。 */
+        if (task3_line_valid() != 0U) {
+            task2_curve_line_seen = 1U;
+        }
+        task2_edge_candidate_tick = 0U;
+        return 0U;
+    }
+    if ((course_task == H_COURSE_TASK2_ABCD) &&
+        ((task2_curve_line_seen == 0U) ||
+         ((task3_distance_mm - task2_curve_start_mm) <
+          H_COURSE_TASK2_EDGE_MIN_MM))) {
         task2_edge_candidate_tick = 0U;
         return 0U;
     }
@@ -377,28 +412,61 @@ static void task3_enter_phase(HCourse_Task3Phase phase, uint32_t now)
     line_recover_exit_tick = 0U;
     line_recover_white_tick = 0U;
     task3_diag_rescue = 0U;
+    task3_heading_bad_tick = 0U;
+}
+
+/* 返回 1 表示航向误差已经连续超限，短暂跳变只启动计时。 */
+static uint8_t task3_heading_fault_confirmed(int16_t error, uint32_t now)
+{
+    if ((error <= H_COURSE_TASK3_DIAG_TOL_X10) &&
+        (error >= -H_COURSE_TASK3_DIAG_TOL_X10)) {
+        task3_heading_bad_tick = 0U;
+        return 0U;
+    }
+    if (task3_heading_bad_tick == 0U) {
+        task3_heading_bad_tick = now;
+        return 0U;
+    }
+    return ((now - task3_heading_bad_tick) >=
+            H_COURSE_TASK3_HEADING_FAULT_MS) ? 1U : 0U;
 }
 
 /* 几何航向(度×10;正 yaw = 左转,AC 为右转 α):
  * 出发记录 start = 出发yaw − α;东向基准 east = start + α = 出发方向。 */
 static int16_t task3_diag_heading_x10(void)
 {
-    int32_t t = (int32_t)task3_start_heading_x10;
+    int32_t t;
     if (task3_leg == 2U) {
-        t += 1800 + 2 * (int32_t)H_COURSE_TASK3_DIAG_ANGLE_X10 +
+        /* B点先摆正到 B->A 的实测方向(-170°),再转入 B-D 斜线
+         * 35°,最后叠加 BD 微调(-3°)。 */
+        t = (int32_t)task2_start_heading_x10 +
+            (int32_t)H_COURSE_TASK34_B_EXIT_TARGET_X10 +
+            (int32_t)H_COURSE_TASK3_DIAG_ANGLE_X10 +
              (int32_t)H_COURSE_TASK3_BD_TRIM_X10;
     } else {
-        t += (int32_t)H_COURSE_TASK3_AC_TRIM_X10;
+        /* A-C:启动方向右转35°,再叠加 AC 微调(-2°)。 */
+        t = (int32_t)task3_start_heading_x10 +
+            (int32_t)H_COURSE_TASK3_AC_TRIM_X10;
     }
     return task3_wrap_x10(t);
+}
+
+/* 任务3/4 B点出弯摆正目标。A->B 的启动航向为 0,实测 B->A 为
+ * -170°;因此这里直接以任务启动航向为零点计算摆正目标。
+ * 该目标与 B-D 斜线的 35°几何航向完全分开。 */
+static int16_t task34_b_exit_heading_x10(void)
+{
+    return task3_wrap_x10((int32_t)task2_start_heading_x10 +
+                          (int32_t)H_COURSE_TASK34_B_EXIT_TARGET_X10);
 }
 
 /* A->C 的全局航向。任务4 每圈回到 A 后直接摆正到下一段斜线，
  * 不把上一圈的实际偏差累积到下一圈。 */
 static int16_t task3_ac_global_heading_x10(void)
 {
+    /* task3_start_heading_x10 已定义为启动航向减去 AC 斜线角，
+     * 所以 A 点下一圈的 AC 航向 = start_heading + AC 微调。 */
     return task3_wrap_x10((int32_t)task3_start_heading_x10 +
-                          (int32_t)H_COURSE_TASK3_DIAG_ANGLE_X10 +
                           (int32_t)H_COURSE_TASK3_AC_TRIM_X10);
 }
 
@@ -408,6 +476,16 @@ static int16_t task3_tangent_heading_x10(uint8_t end)
                    (int32_t)H_COURSE_TASK3_DIAG_ANGLE_X10;
     uint8_t add180 = (task3_leg == 1U) ? end : (uint8_t)(!end);
     return task3_wrap_x10(east + (add180 != 0U ? 1800 : 0));
+}
+
+/* 任务4斜线超距后的摆正方向:
+ * AC 末端(C点)下一段接 B,应沿 A->B 方向;
+ * BD 末端(D点)下一段接 A,应沿 B->A 方向。
+ * 两段不能共用同一个 tangent(0),否则其中一段会反向 180 度。 */
+static int16_t task4_rescue_heading_x10(void)
+{
+    return (task3_leg == 0U) ? task3_tangent_heading_x10(1U)
+                             : task3_tangent_heading_x10(0U);
 }
 
 static int16_t task3_align_heading_x10(void)
@@ -421,7 +499,10 @@ static uint8_t task3_turn_control(uint32_t now)
 {
     int16_t error = task3_wrap_x10((int32_t)task3_turn_target_x10 -
                                    (int32_t)current_yaw_x10);
-    int16_t turn_pwm = H_COURSE_TASK3_TURN_PWM;
+    int16_t turn_pwm = ((course_task == H_COURSE_TASK4_FOUR_LAPS) &&
+                        ((task3_phase == H_COURSE_TASK4_EXIT_ALIGN) ||
+                         (task3_diag_rescue == 1U))) ?
+                       H_COURSE_TASK4_TURN_PWM : H_COURSE_TASK3_TURN_PWM;
 
     if (task3_stable((error > -H_COURSE_TASK3_ALIGN_TOL_X10) &&
                      (error <  H_COURSE_TASK3_ALIGN_TOL_X10), now) != 0U) {
@@ -431,11 +512,11 @@ static uint8_t task3_turn_control(uint32_t now)
     /* 靠近目标(误差<10°)降速:避免高速扫过停止窗口来回摆;
      * 但不能低于 50(再低会推不动车,直接停转超时) */
     if ((error > -100) && (error < 100)) {
-        turn_pwm = 50;
+        turn_pwm = H_COURSE_TASK3_TURN_FINE_PWM;
     }
-    /* 本车:正 yaw = 左转,MOTOR_A = 物理右轮(交叉接线):
-     * 误差>0 → 需左转 → 驱动物理右轮 MOTOR_A;
-     * 误差<0 → 需右转 → 驱动物理左轮 MOTOR_B。 */
+    /* MOTOR_A=物理右轮、MOTOR_B=物理左轮(交叉接线),正 yaw = 左转:
+     * 误差>0 → 需左转 → 驱动右轮 MOTOR_A;
+     * 误差<0 → 需右转 → 驱动左轮 MOTOR_B。 */
     last_left_pwm = (error > 0) ? turn_pwm : 0;
     last_right_pwm = (error < 0) ? turn_pwm : 0;
     MOTOR_SetSpeeds(last_left_pwm, last_right_pwm);
@@ -443,10 +524,24 @@ static uint8_t task3_turn_control(uint32_t now)
 }
 
 static uint8_t task3_fault_code;   /* 1总超时 2陀螺仪 3航向 4线头距离 5转向超时 6捕捉超时 */
+static char task3_fault_phase;
 
 static void task3_fault(uint32_t now, uint8_t code)
 {
     task3_fault_code = code;
+    if (code == 5U) {
+        if (task3_phase == H_COURSE_TASK4_EXIT_ALIGN) {
+            task3_fault_phase = 'E';
+        } else if (task3_phase == H_COURSE_TASK3_START_ALIGN) {
+            task3_fault_phase = 'S';
+        } else if (task3_phase == H_COURSE_TASK3_ALIGN) {
+            task3_fault_phase = 'T';
+        } else {
+            task3_fault_phase = '-';
+        }
+    } else {
+        task3_fault_phase = '-';
+    }
     task3_phase = H_COURSE_TASK3_FAULT;
     task3_stop(H_COURSE_STATE_FAULT, now);
 }
@@ -500,8 +595,8 @@ static void sync_tick(void)
     sync_left_filt += 0.3f * (raw_l - sync_left_filt);
     sync_right_filt += 0.3f * (raw_r - sync_right_filt);
 
-    /* 误差 = (左轮实际转速 + 轮径补偿) − 右轮实际转速
-     * (右轮慢 → 误差为正 → 右轮加力) */
+    /* A=物理右轮、B=物理左轮(交叉接线):误差 = (A 轮转速 + 轮径补偿) −
+     * B 轮转速(B 轮慢 → 误差为正 → B 轮加力,左轮追右轮) */
     error = (sync_left_filt + H_COURSE_SYNC_RPM_TRIM) - sync_right_filt;
     sync_integral += error * ((float)H_COURSE_CONTROL_PERIOD_MS / 1000.0f);
     if (sync_integral > H_COURSE_SYNC_INTEGRAL_LIMIT) sync_integral = H_COURSE_SYNC_INTEGRAL_LIMIT;
@@ -521,15 +616,6 @@ static int16_t sync_right_pwm(void)
     return clamp_speed((int32_t)H_COURSE_STRAIGHT_PWM_RIGHT + (int32_t)sync_correction);
 }
 
-static void task3_diag_steer(uint8_t blacks,
-                             int16_t base_left, int16_t base_right)
-{
-    /* 已由 Sunward 风格的状态机(转向/捕捉/航向保持)取代,保留空壳 */
-    (void)blacks;
-    (void)base_left;
-    (void)base_right;
-}
-
 static void control_task3(uint32_t now, uint8_t blacks,
                           int16_t base_left, int16_t base_right)
 {
@@ -537,20 +623,25 @@ static void control_task3(uint32_t now, uint8_t blacks,
     float progress = task3_distance_mm - task3_leg_start_mm;
     int16_t heading_err;
     int16_t target;
+    uint8_t line_valid;
 
     (void)base_left;
     (void)base_right;
 
     if ((task3_phase == H_COURSE_TASK3_FAULT) ||
         (task3_phase == H_COURSE_TASK3_DONE)) return;
-    if ((course_task == H_COURSE_TASK4_FOUR_LAPS) &&
+    if (((course_task == H_COURSE_TASK3_ACBDA) ||
+         (course_task == H_COURSE_TASK4_FOUR_LAPS)) &&
         (yaw_sample_valid == 0U)) {
-        /* 不能用上次的 yaw 继续转向。短暂读失败先停车,持续 1 秒才报 E2R。 */
+        /* 任务3/4都依赖当前 yaw。不能用上次的旧角度继续控制；
+         * 短暂读失败先停车，持续 1 秒才报 E2。 */
         MOTOR_SetSpeeds(0, 0);
         last_left_pwm = 0;
         last_right_pwm = 0;
         if ((now - yaw_last_ok_tick) >= 1000U) {
-            task4_imu_failure = 'R';
+            if (course_task == H_COURSE_TASK4_FOUR_LAPS) {
+                task4_imu_failure = 'R';
+            }
             task3_fault(now, 2U);
         }
         return;
@@ -585,37 +676,93 @@ static void control_task3(uint32_t now, uint8_t blacks,
         return;
 
     case H_COURSE_TASK3_DIAGONAL:
+        /* 任务4救援不是继续沿斜线前进。超距后先转到该斜线末端的
+         * 切线/直行方向,车身稳定后再低速向前找黑线。 */
+        if ((course_task == H_COURSE_TASK4_FOUR_LAPS) &&
+            (task3_diag_rescue != 0U)) {
+            if (progress > 2.0f * H_COURSE_TASK3_DIAG_MM) {
+                /* 救援模式跑了两倍斜线长度还找不到线:真故障 */
+                task3_fault(now, 4U);
+                return;
+            }
+
+            if (task3_diag_rescue == 1U) {
+                task3_turn_target_x10 = task4_rescue_heading_x10();
+                if (elapsed >= H_COURSE_TASK4_ALIGN_TIMEOUT_MS) {
+                    task3_fault(now, 5U);
+                    return;
+                }
+                if (task3_turn_control(now) != 0U) {
+                    task3_diag_rescue = 2U;
+                    task3_phase_tick = now;
+                    task3_edge_tick = 0U;
+                    target_yaw_x10 = task3_turn_target_x10;
+                    yaw_integral = 0.0f;
+                    yaw_previous_error = 0.0f;
+                    sync_reset();
+                }
+                return;
+            }
+
+            target = task4_rescue_heading_x10();
+            target_yaw_x10 = target;
+            line_valid = task3_line_valid();
+            if ((line_valid != 0U) && (task3_stable(1, now) != 0U)) {
+                /* 找回有效黑线后,沿原有任务3流程进入顶点刹车。 */
+                course_node_count = (task3_leg == 0U) ? 1U : 3U;
+                buzzer_beep(now);
+                task3_enter_phase(H_COURSE_TASK3_VERTEX_BRAKE, now);
+                MOTOR_SetSpeeds(0, 0);
+                return;
+            }
+            if (line_valid == 0U) task3_stable(0, now);
+            apply_yaw_hold_pair(H_COURSE_TASK4_RESCUE_PWM,
+                                H_COURSE_TASK4_RESCUE_PWM);
+            return;
+        }
+
         target = task3_diag_heading_x10();
         heading_err = task3_wrap_x10((int32_t)target - (int32_t)current_yaw_x10);
-        if ((heading_err > H_COURSE_TASK3_DIAG_TOL_X10) ||
-            (heading_err < -H_COURSE_TASK3_DIAG_TOL_X10)) { task3_fault(now, 3U); return; }
+        if (task3_heading_fault_confirmed(heading_err, now) != 0U) {
+            task3_fault(now, 3U);
+            return;
+        }
+
+        /* 正常线头优先于超距救援。只有在有效黑线连续确认失败时，
+         * 才允许根据距离进入救援，避免在线头附近突然转离赛道。 */
+        line_valid = task3_line_valid();
+        if ((line_valid != 0U) &&
+            (progress >= H_COURSE_TASK3_DIAG_MM - H_COURSE_TASK3_ENTRY_WINDOW_MM) &&
+            ((course_task == H_COURSE_TASK4_FOUR_LAPS) ||
+             (progress <= H_COURSE_TASK3_DIAG_MM +
+                          H_COURSE_TASK3_ENTRY_WINDOW_MM))) {
+            if (task3_stable(1, now) != 0U) {
+                course_node_count = (task3_leg == 0U) ? 1U : 3U;   /* C / D */
+                buzzer_beep(now);
+                task3_enter_phase(H_COURSE_TASK3_VERTEX_BRAKE, now);
+                MOTOR_SetSpeeds(0, 0);
+                return;
+            }
+            target_yaw_x10 = target;
+            apply_yaw_hold_pair(H_COURSE_TASK3_DIAG_PWM, H_COURSE_TASK3_DIAG_PWM);
+            return;
+        }
+        task3_stable(0, now);
+
         if ((course_task == H_COURSE_TASK4_FOUR_LAPS) &&
             (task3_diag_rescue == 0U) &&
-            (progress > H_COURSE_TASK3_DIAG_MM + H_COURSE_TASK3_ENTRY_WINDOW_MM)) {
-            /* 任务4 救援:超出预期距离还没压到黑线 → 不判故障,
-             * 摆正车身(yaw 保持自动回正),持续直行直到压线 */
+            (progress > H_COURSE_TASK3_DIAG_MM +
+                       H_COURSE_TASK4_RESCUE_TRIGGER_MM)) {
+            /* 超距后先进入摆正阶段,不要继续保持斜线航向。 */
             task3_diag_rescue = 1U;
-            target_yaw_x10 = target;
-            yaw_integral = 0.0f;
-            yaw_previous_error = 0.0f;
+            task3_turn_target_x10 = task4_rescue_heading_x10();
+            task3_phase_tick = now;
+            task3_edge_tick = 0U;
+            MOTOR_SetSpeeds(0, 0);
+            return;
         } else if ((course_task != H_COURSE_TASK4_FOUR_LAPS) &&
                    (progress > H_COURSE_TASK3_DIAG_MM + H_COURSE_TASK3_ENTRY_WINDOW_MM)) {
             task3_fault(now, 4U); return;
-        }
-        if ((task3_diag_rescue != 0U) &&
-            (progress > 2.0f * H_COURSE_TASK3_DIAG_MM)) {
-            /* 救援模式跑了两倍斜线长度还找不到线:真故障 */
-            task3_fault(now, 4U); return;
-        }
-        if ((task3_line_valid() != 0U) && (task3_stable(1, now) != 0U) &&
-            ((task3_diag_rescue != 0U) ||
-             (progress >= H_COURSE_TASK3_DIAG_MM - H_COURSE_TASK3_ENTRY_WINDOW_MM))) {
-            /* 窗口内(或救援中)压到有效黑线 → 进入顶点制动 */
-            course_node_count = (task3_leg == 0U) ? 1U : 3U;   /* C / D */
-            buzzer_beep(now);
-            task3_enter_phase(H_COURSE_TASK3_VERTEX_BRAKE, now);
-            MOTOR_SetSpeeds(0, 0);
-            return;
         }
         target_yaw_x10 = target;
         apply_yaw_hold_pair(H_COURSE_TASK3_DIAG_PWM, H_COURSE_TASK3_DIAG_PWM);
@@ -625,16 +772,18 @@ static void control_task3(uint32_t now, uint8_t blacks,
         if ((elapsed >= H_COURSE_TASK3_SETTLE_MS) &&
             ((int32_t)sync_left_filt <= H_COURSE_TASK3_SETTLE_RPM) &&
             ((int32_t)sync_right_filt <= H_COURSE_TASK3_SETTLE_RPM)) {
-            if ((course_task == H_COURSE_TASK4_FOUR_LAPS) &&
-                (task3_leg == 1U)) {
-                /* C-B 出弯:直接按全局基准摆正到下一段 B-D 斜线。 */
+            if (task3_leg == 1U) {
+                /* C-B 出弯后先摆正到实测 B->A 方向(-170°)。停稳后
+                 * 还会再转约35°到 B-D 斜线方向，不能直接开始直行。 */
                 ++task3_leg;
-                task3_turn_target_x10 = task3_diag_heading_x10();
+                task3_turn_target_x10 = task34_b_exit_heading_x10();
                 sync_reset();
                 task3_enter_phase(H_COURSE_TASK4_EXIT_ALIGN, now);
             } else {
                 ++task3_leg;
-                task3_turn_target_x10 = task3_align_heading_x10();
+                task3_turn_target_x10 = (task3_leg == 2U) ?
+                                        task34_b_exit_heading_x10() :
+                                        task3_align_heading_x10();
                 sync_reset();
                 task3_enter_phase(H_COURSE_TASK3_ALIGN, now);
             }
@@ -658,21 +807,25 @@ static void control_task3(uint32_t now, uint8_t blacks,
         target = task3_tangent_heading_x10(0U);
         heading_err = task3_wrap_x10((int32_t)target - (int32_t)current_yaw_x10);
         if (elapsed >= H_COURSE_TASK3_CAPTURE_TIMEOUT_MS) { task3_fault(now, 6U); return; }
-        if ((heading_err > H_COURSE_TASK3_DIAG_TOL_X10) ||
-            (heading_err < -H_COURSE_TASK3_DIAG_TOL_X10)) { task3_fault(now, 3U); return; }
-        if ((task3_line_valid() != 0U) && (task3_stable(1, now) != 0U)) {
+        if (task3_heading_fault_confirmed(heading_err, now) != 0U) {
+            task3_fault(now, 3U);
+            return;
+        }
+        line_valid = task3_line_valid();
+        if ((line_valid != 0U) && (task3_stable(1, now) != 0U)) {
             task3_leg_start_mm = task3_distance_mm;
             task3_enter_phase(H_COURSE_TASK3_ARC, now);
             return;
         }
+        if (line_valid == 0U) task3_stable(0, now);
         target_yaw_x10 = target;
         apply_yaw_hold_pair(H_COURSE_TASK3_CAPTURE_PWM, H_COURSE_TASK3_CAPTURE_PWM);
         return;
 
     case H_COURSE_TASK3_ARC:
-        /* 和任务2 相同的全白判定:全白持续 250ms = 弧线走完 */
-        if ((line_recover_dir == 0) &&
-            (task2_all_white_event(now, blacks) != 0U)) {
+        /* 和任务2相同的全白判定。线恢复状态不能阻塞线尾计时，
+         * 否则最后压到P1/P4时会额外向前找线约1.5秒。 */
+        if (task2_all_white_event(now, blacks) != 0U) {
             course_node_count = (task3_leg == 1U) ? 2U : 4U;   /* B / A */
             if (task3_leg == 3U) {
                 if (course_task == H_COURSE_TASK4_FOUR_LAPS) buzzer_beep(now);
@@ -704,7 +857,7 @@ static void control_task3(uint32_t now, uint8_t blacks,
         return;
 
     case H_COURSE_TASK4_EXIT_ALIGN:
-        if (elapsed >= H_COURSE_TASK3_ALIGN_TIMEOUT_MS) { task3_fault(now, 5U); return; }
+        if (elapsed >= H_COURSE_TASK4_ALIGN_TIMEOUT_MS) { task3_fault(now, 5U); return; }
         if (task3_turn_control(now) != 0U) {
             sync_reset();
             task3_enter_phase(H_COURSE_TASK4_EXIT_SETTLE, now);
@@ -730,13 +883,16 @@ static void control_task3(uint32_t now, uint8_t blacks,
                 task3_leg = 0U;
                 task3_distance_mm = 0.0f;
                 task3_leg_start_mm = 0.0f;
+                sync_reset();
+                /* A 点已经在 EXIT_ALIGN 对准下一圈的 AC 全局航向，
+                 * 不再重复做一次较低 PWM 的 START_ALIGN。 */
+                task3_enter_phase(H_COURSE_TASK3_DIAGONAL, now);
+            } else {
+                /* B 点第一步已摆正到 -170°；第二步再转到 B-D
+                 * 的几何航向，转到位后才允许进入斜线直行。 */
                 task3_turn_target_x10 = task3_diag_heading_x10();
                 sync_reset();
-                task3_enter_phase(H_COURSE_TASK3_START_ALIGN, now);
-            } else {
-                /* C-B 出弯已完成摆正,下一步直接进入 B-D 斜线。 */
-                task3_leg_start_mm = task3_distance_mm;
-                task3_enter_phase(H_COURSE_TASK3_DIAGONAL, now);
+                task3_enter_phase(H_COURSE_TASK3_ALIGN, now);
             }
         }
         return;
@@ -754,6 +910,16 @@ static void control_line(uint32_t now, uint8_t blacks,
     float correction;
     int32_t left;
     int32_t right;
+    int32_t recover_diff = H_COURSE_LINE_RECOVER_DIFF;
+    int32_t recover_speed_pct = H_COURSE_LINE_RECOVER_SPEED_PCT;
+    uint32_t recover_brake_ms = H_COURSE_LINE_RECOVER_BRAKE_MS;
+
+    if ((course_task == H_COURSE_TASK3_ACBDA) ||
+        (course_task == H_COURSE_TASK4_FOUR_LAPS)) {
+        recover_diff = H_COURSE_TASK34_RECOVER_DIFF;
+        recover_speed_pct = H_COURSE_TASK34_RECOVER_SPEED_PCT;
+        recover_brake_ms = H_COURSE_TASK34_RECOVER_BRAKE_MS;
+    }
 
     if (blacks == 0U) {
         if (course_lost_line_tick == 0U) course_lost_line_tick = now;
@@ -763,9 +929,9 @@ static void control_line(uint32_t now, uint8_t blacks,
         if (line_recover_dir != 0) {
             if (line_recover_white_tick == 0U) line_recover_white_tick = now;
             if ((now - line_recover_white_tick) <= H_COURSE_LINE_RECOVER_WHITE_MS) {
-                int32_t diff = (int32_t)H_COURSE_LINE_RECOVER_DIFF * line_recover_dir;
+                int32_t diff = recover_diff * line_recover_dir;
                 int32_t slow_base = ((int32_t)base_left + (int32_t)base_right) *
-                                    (int32_t)H_COURSE_LINE_RECOVER_SPEED_PCT / 200;
+                                    recover_speed_pct / 200;
                 last_left_pwm = clamp_speed(slow_base + diff);
                 last_right_pwm = clamp_speed(slow_base - diff);
                 MOTOR_SetSpeeds(last_left_pwm, last_right_pwm);
@@ -781,8 +947,21 @@ static void control_line(uint32_t now, uint8_t blacks,
             MOTOR_SetSpeeds(last_left_pwm, last_right_pwm);
             return;
         }
+
+        /* 任务2的弯道出口可能有一段传感器全白区。此时不能使用
+         * AB/CD直线阶段的旧航向目标，否则会在弯道尚未完全出完时
+         * 把车头拉回旧方向，造成出弯角度随机。保持最近差速直到
+         * task2_all_white_event()确认线尾，再由新直线重新捕获航向。 */
+        if ((course_task == H_COURSE_TASK2_ABCD) &&
+            ((task2_phase == H_COURSE_TASK2_BC_LINE) ||
+             (task2_phase == H_COURSE_TASK2_DA_LINE)) &&
+            ((now - course_lost_line_tick) <= H_COURSE_TASK2_EDGE_HOLD_MS)) {
+            MOTOR_SetSpeeds(last_left_pwm, last_right_pwm);
+            return;
+        }
 #if H_COURSE_ENABLE_YAW_HOLD
-        if ((yaw_ready != 0U) && ((now - course_lost_line_tick) <= H_COURSE_LOST_LINE_HOLD_MS)) {
+        if ((yaw_sample_valid != 0U) &&
+            ((now - course_lost_line_tick) <= H_COURSE_LOST_LINE_HOLD_MS)) {
             apply_yaw_hold_pair(base_left, base_right);
             return;
         }
@@ -845,9 +1024,9 @@ static void control_line(uint32_t now, uint8_t blacks,
         } else {
             line_recover_exit_tick = 0U;
             /* 减速追线:减小动量,避免摆幅太大直接越过中线 */
-            int32_t diff = (int32_t)H_COURSE_LINE_RECOVER_DIFF * line_recover_dir;
+            int32_t diff = recover_diff * line_recover_dir;
             int32_t slow_base = ((int32_t)base_left + (int32_t)base_right) *
-                                (int32_t)H_COURSE_LINE_RECOVER_SPEED_PCT / 200;
+                                recover_speed_pct / 200;
             last_left_pwm = clamp_speed(slow_base + diff);
             last_right_pwm = clamp_speed(slow_base - diff);
             MOTOR_SetSpeeds(last_left_pwm, last_right_pwm);
@@ -856,12 +1035,12 @@ static void control_line(uint32_t now, uint8_t blacks,
     }
     if ((last_track.p1 == 0U) && (last_track.p2 != 0U) && (last_track.p3 != 0U)) {
         if (line_recover_dir == 0) {
-            line_recover_brake_until = now + H_COURSE_LINE_RECOVER_BRAKE_MS;
+            line_recover_brake_until = now + recover_brake_ms;
         }
         line_recover_dir = 1;
     } else if ((last_track.p4 == 0U) && (last_track.p2 != 0U) && (last_track.p3 != 0U)) {
         if (line_recover_dir == 0) {
-            line_recover_brake_until = now + H_COURSE_LINE_RECOVER_BRAKE_MS;
+            line_recover_brake_until = now + recover_brake_ms;
         }
         line_recover_dir = -1;
     }
@@ -932,11 +1111,14 @@ HAL_StatusTypeDef HCourse_Init(HCourse_Task task)
     yaw_ready = 0U;
     yaw_sample_valid = 0U;
     yaw_last_ok_tick = HAL_GetTick();
+    task_start_yaw_x10 = 0;
     task4_imu_failure = '-';
     yaw_integral = 0.0f;
     yaw_previous_error = 0.0f;
     task2_phase = H_COURSE_TASK2_AB_STRAIGHT;
     task2_edge_candidate_tick = 0U;
+    task2_curve_line_seen = 0U;
+    task2_curve_start_mm = 0.0f;
     task3_phase = H_COURSE_TASK3_START_ALIGN;
     task3_phase_tick = 0U;
     task3_edge_tick = 0U;
@@ -986,6 +1168,10 @@ void HCourse_Start(void)
     /* 每次出发都重新记录目标航向:车已摆在出发点,当前朝向就是
      * 本任务的基准方向,上次任务累积的 yaw 误差不带进下一次。 */
     target_yaw_x10 = current_yaw_x10;
+    /* OLED 的 Y 轴零点只在本次任务启动时建立；任务4后续每个节点和
+     * 每圈重启内部阶段时都不再修改它。 */
+    task_start_yaw_x10 = current_yaw_x10;
+    task2_start_heading_x10 = current_yaw_x10;
     course_node_count = 0U;
     course_node_armed = 1U;
     course_start_tick = now;
@@ -1003,6 +1189,8 @@ void HCourse_Start(void)
     yaw_previous_error = 0.0f;
     task2_phase = H_COURSE_TASK2_AB_STRAIGHT;
     task2_edge_candidate_tick = 0U;
+    task2_curve_line_seen = 0U;
+    task2_curve_start_mm = 0.0f;
     task4_lap = 0U;
     if ((course_task == H_COURSE_TASK3_ACBDA) ||
         (course_task == H_COURSE_TASK4_FOUR_LAPS)) {
@@ -1072,7 +1260,7 @@ void HCourse_PeriodicTask(void)
             buzzer_beep(now);   /* 任务1 停车:响铃 + LED */
         } else {
             MOTOR_SetEnabled(1U);
-            if (yaw_ready != 0U) {
+            if (yaw_sample_valid != 0U) {
                 /* 直行:陀螺仪航向保持(校准后的原始 yaw) */
                 apply_yaw_hold_pair(H_COURSE_STRAIGHT_PWM_LEFT,
                                     H_COURSE_STRAIGHT_PWM_RIGHT);
@@ -1112,6 +1300,9 @@ void HCourse_PeriodicTask(void)
             }
             if (course_node_count == 1U) {
                 yaw_retarget();
+                task2_curve_start_mm = task3_distance_mm;
+                task2_curve_line_seen = 0U;
+                task2_edge_candidate_tick = 0U;
                 task2_phase = H_COURSE_TASK2_BC_LINE;
             } else if (course_node_count == 2U) {
                 yaw_retarget();
@@ -1120,16 +1311,18 @@ void HCourse_PeriodicTask(void)
         }
 
         if ((task2_phase == H_COURSE_TASK2_BC_LINE) &&
-            (line_recover_dir == 0) &&
             (task2_all_white_event(now, blacks) != 0U)) {
             buzzer_beep(now);
             yaw_retarget();
-            /* 第二个直线(C-D)方向补偿:过第一个弯道后右偏 → 往左 +5° */
-            target_yaw_x10 = task3_wrap_x10((int32_t)target_yaw_x10 +
+            /* C-D 与启动时 A-B 方向相反。不能以弯道出口的当前角度
+             * 作为目标,否则循迹摆动造成的随机出弯角会被带进直线。 */
+            target_yaw_x10 = task3_wrap_x10((int32_t)task2_start_heading_x10 +
+                                            1800 +
                                             (int32_t)H_COURSE_TASK2_CD_TRIM_X10);
+            task2_curve_line_seen = 0U;
+            task2_edge_candidate_tick = 0U;
             task2_phase = H_COURSE_TASK2_CD_STRAIGHT;
         } else if ((task2_phase == H_COURSE_TASK2_DA_LINE) &&
-                   (line_recover_dir == 0) &&
                    (task2_all_white_event(now, blacks) != 0U)) {
             HCourse_Stop();
             course_state = H_COURSE_STATE_FINISHED;
@@ -1141,6 +1334,9 @@ void HCourse_PeriodicTask(void)
         if ((task2_phase == H_COURSE_TASK2_CD_STRAIGHT) &&
             (course_node_count >= 2U) && (node_event != 0U)) {
             yaw_retarget();
+            task2_curve_start_mm = task3_distance_mm;
+            task2_curve_line_seen = 0U;
+            task2_edge_candidate_tick = 0U;
             task2_phase = H_COURSE_TASK2_DA_LINE;
         }
 
@@ -1148,7 +1344,7 @@ void HCourse_PeriodicTask(void)
             (task2_phase == H_COURSE_TASK2_CD_STRAIGHT)) {
             /* 直行:陀螺仪航向保持;失效时退回右轮同步 */
             course_state = H_COURSE_STATE_STRAIGHT_HOLD;
-            if (yaw_ready != 0U) {
+            if (yaw_sample_valid != 0U) {
                 apply_yaw_hold_pair(H_COURSE_STRAIGHT_PWM_LEFT,
                                     H_COURSE_STRAIGHT_PWM_RIGHT);
             } else {
@@ -1195,7 +1391,8 @@ void HCourse_UpdateOLED(void)
             h3_err_text[2] = ' '; h3_err_text[3] = 'E';
             h3_err_text[4] = (char)('0' + task3_fault_code);
             h3_err_text[5] = (course_task == H_COURSE_TASK4_FOUR_LAPS) ?
-                              task4_imu_failure : ' ';
+                              ((task3_fault_code == 5U) ? task3_fault_phase :
+                               task4_imu_failure) : ' ';
             h3_err_text[6] = ' '; h3_err_text[7] = '\0';
             state_text = h3_err_text;
         } else {
@@ -1255,7 +1452,13 @@ void HCourse_UpdateOLED(void)
         } else {
             static char h4_text[8];
             const char *phase = "TN";   /* TURN */
-            if (task3_phase == H_COURSE_TASK3_DIAGONAL) {
+            if ((task3_phase == H_COURSE_TASK3_DIAGONAL) &&
+                (task3_diag_rescue == 1U)) {
+                phase = "RA";           /* RESCUE ALIGN */
+            } else if ((task3_phase == H_COURSE_TASK3_DIAGONAL) &&
+                       (task3_diag_rescue == 2U)) {
+                phase = "RF";           /* RESCUE FIND */
+            } else if (task3_phase == H_COURSE_TASK3_DIAGONAL) {
                 phase = (task3_leg == 0U) ? "AC" : "BD";
             } else if (task3_phase == H_COURSE_TASK3_CAPTURE) {
                 phase = "CP";
@@ -1294,7 +1497,7 @@ void HCourse_UpdateOLED(void)
     OLED_ShowInt16(66U, 2U, (int16_t)sync_right_filt);
 
     OLED_ShowString(0U, 4U, "Y:");
-    OLED_ShowAngle(12U, 4U, yaw_relative_x10());
+    OLED_ShowAngle(12U, 4U, task_start_yaw_relative_x10());
     OLED_ShowString(54U, 4U, "C:");
     OLED_ShowInt16(66U, 4U, last_yaw_correction);
 

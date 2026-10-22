@@ -14,8 +14,6 @@
   */
 void LED_Init(void)
 {
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
-
     /* 使能GPIO时钟 */
     LED1_GPIO_CLK_ENABLE();
     LED2_GPIO_CLK_ENABLE();

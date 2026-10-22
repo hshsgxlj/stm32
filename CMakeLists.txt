@@ -56,6 +56,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/motor.c
     Core/Src/line_follow.c
     Core/Src/h_course.c
+    Core/Src/chapter.c
     Core/badapple/badapple.c
     "Core/experimental code/task11_led_blink.c"
     "Core/experimental code/task13_track_sensor.c"

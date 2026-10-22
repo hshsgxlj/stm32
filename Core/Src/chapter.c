@@ -7,30 +7,10 @@
 
 #include "chapter.h"
 #include "h_course.h"
-#include "led.h"
-#include "line_follow.h"
 #include "main.h"
-#include "motor.h"
 #include "oled.h"
-#include "stm32f1xx_hal_uart.h"
-#include "task11_led_blink.h"
-#include "task13_track_sensor.h"
-#include "task21_uart_echo.h"
-#include "task22_encoder_printf.h"
-#include "task23_vofa_dma.h"
-#include "task31_pwm_encoder.h"
-#include "task31_tim2_pwm.h"
-#include "task32_motor_encoder.h"
-#include "task33_encoder_periodic.h"
-#include "task34_pid_vofa.h"
-#include "task41_iic_mpu6050.h"
-#include "task42_spi_oled.h"
-#include "task43_dmp_oled.h"
-#include "task51_pid_position.h"
-#include "task52_pid_incremental.h"
-#include <stdio.h>
 
-/* huart1 is defined in main.c; chapter.c is included before that definition. */
+/* huart1 is generated and defined in main.c. */
 extern UART_HandleTypeDef huart1;
 
 /**
@@ -52,6 +32,12 @@ int __io_putchar(int ch) {
 volatile uint8_t outputs_requested_on = 1U;
 static volatile uint8_t hcourse_start_requested;
 static volatile uint32_t user_key_last_irq_tick;
+static volatile uint8_t user_key_latched;
+static volatile uint32_t user_key_release_low_tick;
+
+/* PA0 is configured by CubeMX for a rising-edge USER-key interrupt. */
+#define USER_KEY_DEBOUNCE_MS       100U
+#define USER_KEY_RELEASE_STABLE_MS 100U
 
 /**
  * @brief  按键中断回调：翻转所有模块开关状态
@@ -67,12 +53,28 @@ void Chapter_UserKeyInterruptInit(void)
   HAL_NVIC_SetPriority(EXTI0_IRQn, 5U, 0U);
   HAL_NVIC_EnableIRQ(EXTI0_IRQn);
   hcourse_start_requested = 0U;
-  user_key_last_irq_tick = HAL_GetTick() - 100U;
+  user_key_last_irq_tick = HAL_GetTick() - USER_KEY_DEBOUNCE_MS;
+  user_key_release_low_tick = HAL_GetTick();
+  /* Do not generate a start event for a key already held at power-up. */
+  user_key_latched = (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) ? 1U : 0U;
 }
 
 uint8_t Chapter_ConsumeHCourseStartRequest(void)
 {
+  uint32_t now = HAL_GetTick();
   uint8_t requested = hcourse_start_requested;
+
+  /* Unlock only after PA0 has remained released for a short stable interval. */
+  if (user_key_latched != 0U) {
+    if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_RESET) {
+      if ((now - user_key_release_low_tick) >= USER_KEY_RELEASE_STABLE_MS) {
+        user_key_latched = 0U;
+      }
+    } else {
+      user_key_release_low_tick = now;
+    }
+  }
+
   hcourse_start_requested = 0U;
   return requested;
 }
@@ -82,8 +84,12 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
   uint32_t now = HAL_GetTick();
 
   if ((GPIO_Pin == GPIO_PIN_0) &&
-      ((now - user_key_last_irq_tick) >= 100U)) {
+      (user_key_latched == 0U) &&
+      (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) &&
+      ((now - user_key_last_irq_tick) >= USER_KEY_DEBOUNCE_MS)) {
     user_key_last_irq_tick = now;
+    user_key_latched = 1U;
+    user_key_release_low_tick = now;
     hcourse_start_requested = 1U;
   }
 }
@@ -151,6 +157,7 @@ static void Chapter_HandleKey(void)
       break;
     case CH_MODE_TEST:
       HCourse_Stop();
+      Chapter_StartTask(H_COURSE_TASK1_AB);
       ch_mode = CH_MODE_TASK1;
       break;
     default:

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd \"/c/Users/hshsgxlj/Desktop/2024电赛小车/stm32/stm32\" && python gen_course_doc.py)",
+      "Read(//c/Users/hshsgxlj/Desktop/2024电赛小车/stm32/stm32/**)"
+    ]
+  }
+}

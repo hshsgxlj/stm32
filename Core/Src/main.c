@@ -21,7 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "chapter.c"
+#include "chapter.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/

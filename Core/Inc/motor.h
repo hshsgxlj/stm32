@@ -5,8 +5,10 @@
 
 /*
  * C10B motor connections:
- * Motor A: PA6/TIM3_CH1, PA7/TIM3_CH2; encoder PB6/PB7 (TIM4).
- * Motor B: PB0/TIM3_CH3, PB1/TIM3_CH4; encoder PC6/PC7 (TIM8).
+ * Motor A (physical RIGHT wheel, crossed wiring): PA6/TIM3_CH1,
+ * PA7/TIM3_CH2; encoder PB6/PB7 (TIM4).
+ * Motor B (physical LEFT wheel): PB0/TIM3_CH3, PB1/TIM3_CH4;
+ * encoder PC6/PC7 (TIM8).
  * Speed range: -1000 (full reverse) to +1000 (full forward).
  */
 #define MOTOR_SPEED_MAX 1000
