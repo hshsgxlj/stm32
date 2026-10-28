@@ -173,6 +173,16 @@
  * 往右补(负值);右偏 → 正值。只作用于 AC 转向和斜线保持。 */
 #define H_COURSE_TASK3_AC_TRIM_X10       -10
 
+/* 任务4 每圈微调表(度×10;正 yaw = 左转,负值 = 往右补):
+ * 行 = 第1~4圈,列 = 斜线段(0 = AC 斜线,1 = BD 斜线)。
+ * 叠加在全局 AC_TRIM / BD_TRIM 之上,只作用于任务4,任务3 不受影响。
+ * 先全部设 0;按每圈实际跑偏逐格微调,方向约定与全局微调一致。 */
+#define H_COURSE_TASK4_LAP_TRIM_X10 \
+    { {   0,   0 }, \
+      {   0,   0 }, \
+      {   0,   0 }, \
+      {   0,   0 } }
+
 /* 轮子周长(mm/圈),用于编码器计距。
  * 实车标定:编码器计 1000mm 实际跑 1090mm → 204.2 × 1.09 ≈ 222.6 */
 #define H_COURSE_TASK3_WHEEL_CIRC_MM      222.6f
@@ -199,7 +209,7 @@
 
 /* 任务4专用:斜线超过预计长度多少毫米后进入救援摆正。
  * 数值越小,越早摆正;建议从 20mm 开始现场调整。 */
-#define H_COURSE_TASK4_RESCUE_TRIGGER_MM  -40.0f
+#define H_COURSE_TASK4_RESCUE_TRIGGER_MM  -90.0f
 
 /* 角度容差(度×10):转向到位 3°,斜线航向 20°。 */
 #define H_COURSE_TASK3_ALIGN_TOL_X10      30

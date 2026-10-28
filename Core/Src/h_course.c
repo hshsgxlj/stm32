@@ -424,6 +424,21 @@ static uint8_t task3_heading_fault_confirmed(int16_t error, uint32_t now)
             H_COURSE_TASK3_HEADING_FAULT_MS) ? 1U : 0U;
 }
 
+/* 任务4 每圈微调表:h_course.h 中定义,行 = 圈(1~4),列 = 斜线段
+ * (0 = AC,1 = BD)。 */
+static const int16_t task4_lap_trim_x10[H_COURSE_TASK4_LAPS][2] =
+    H_COURSE_TASK4_LAP_TRIM_X10;
+
+/* 取指定圈/段的微调值;任务3 或越界一律返回 0。 */
+static int16_t task4_lap_trim_x10_of(uint8_t lap_index, uint8_t seg)
+{
+    if ((course_task != H_COURSE_TASK4_FOUR_LAPS) ||
+        (lap_index >= H_COURSE_TASK4_LAPS) || (seg > 1U)) {
+        return 0;
+    }
+    return task4_lap_trim_x10[lap_index][seg];
+}
+
 /* 几何航向(度×10;正 yaw = 左转,AC 为右转 α):
  * 出发记录 start = 出发yaw − α;东向基准 east = start + α = 出发方向。 */
 static int16_t task3_diag_heading_x10(void)
@@ -431,15 +446,17 @@ static int16_t task3_diag_heading_x10(void)
     int32_t t;
     if (task3_leg == 2U) {
         /* B点先摆正到 B->A 的实测方向(-170°),再转入 B-D 斜线
-         * 35°,最后叠加 BD 微调(-3°)。 */
+         * 35°,最后叠加 BD 微调(-3°)和任务4 当圈 BD 微调。 */
         t = (int32_t)task2_start_heading_x10 +
             (int32_t)H_COURSE_TASK34_B_EXIT_TARGET_X10 +
             (int32_t)H_COURSE_TASK3_DIAG_ANGLE_X10 +
-             (int32_t)H_COURSE_TASK3_BD_TRIM_X10;
+            (int32_t)H_COURSE_TASK3_BD_TRIM_X10 +
+            (int32_t)task4_lap_trim_x10_of(task4_lap, 1U);
     } else {
-        /* A-C:启动方向右转35°,再叠加 AC 微调(-2°)。 */
+        /* A-C:启动方向右转35°,再叠加 AC 微调和任务4 当圈 AC 微调。 */
         t = (int32_t)task3_start_heading_x10 +
-            (int32_t)H_COURSE_TASK3_AC_TRIM_X10;
+            (int32_t)H_COURSE_TASK3_AC_TRIM_X10 +
+            (int32_t)task4_lap_trim_x10_of(task4_lap, 0U);
     }
     return task3_wrap_x10(t);
 }
@@ -458,9 +475,16 @@ static int16_t task34_b_exit_heading_x10(void)
 static int16_t task3_ac_global_heading_x10(void)
 {
     /* task3_start_heading_x10 已定义为启动航向减去 AC 斜线角，
-     * 所以 A 点下一圈的 AC 航向 = start_heading + AC 微调。 */
+     * 所以 A 点下一圈的 AC 航向 = start_heading + AC 微调 +
+     * 下一圈的任务4 AC 微调(圈末对齐时 task4_lap 还是当前圈,
+     * 下一圈 = 当前圈 + 1,封顶 LAPS-1)。 */
+    uint8_t next = task4_lap;
+    if (next < (H_COURSE_TASK4_LAPS - 1U)) {
+        next++;
+    }
     return task3_wrap_x10((int32_t)task3_start_heading_x10 +
-                          (int32_t)H_COURSE_TASK3_AC_TRIM_X10);
+                          (int32_t)H_COURSE_TASK3_AC_TRIM_X10 +
+                          (int32_t)task4_lap_trim_x10_of(next, 0U));
 }
 
 static int16_t task3_tangent_heading_x10(uint8_t end)
