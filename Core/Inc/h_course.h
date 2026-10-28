@@ -179,7 +179,7 @@
 
 /* 各段速度(基准 PWM):斜线、弧线、顶点转向(单轮)、捕捉短驶。
  * 转向单轮速度大 → 惯性大 → 容易转过窗口;角度偏大就先降它。 */
-#define H_COURSE_TASK3_DIAG_PWM           155
+#define H_COURSE_TASK3_DIAG_PWM           200
 #define H_COURSE_TASK3_ARC_PWM            145
 #define H_COURSE_TASK3_TURN_PWM           110
 #define H_COURSE_TASK3_TURN_FINE_PWM      75
@@ -221,8 +221,8 @@
 
 /* 直行段:MOTOR_A(物理右轮)固定 PWM(基准),MOTOR_B(物理左轮)
  * 用 PID 跟踪右轮实际转速。两个 PWM 常量是 B 轮修正的基准值。 */
-#define H_COURSE_STRAIGHT_PWM_LEFT       155
-#define H_COURSE_STRAIGHT_PWM_RIGHT      155
+#define H_COURSE_STRAIGHT_PWM_LEFT       200
+#define H_COURSE_STRAIGHT_PWM_RIGHT      200
 
 /* 左轮同步 PID(误差 = 右轮(A)实际转速 + 补偿 − 左轮(B)实际转速,
  * 单位 RPM):KP:每 1 RPM 差给多少 PWM;KI:消除持续偏差(左右轮阻力差异)。
@@ -237,11 +237,12 @@
  * 车右偏 → 调大(左轮跑更快);车左偏 → 调小或填负值。 */
 #define H_COURSE_SYNC_RPM_TRIM           0.3f
 
-/* 串口调试开关:1=打开(115200 打印传感器/转速/PWM,用串口助手看),
- * 0=关闭。调车时打开,正式跑时关掉。 */
+/* 串口遥测开关:1=打开,USART2(PA2-TX)以 115200 8N1 每 100ms 输出一行 CSV。
+ * 0=关闭。 */
 #ifndef H_COURSE_DEBUG
-#define H_COURSE_DEBUG                   0
+#define H_COURSE_DEBUG                   1
 #endif
+#define H_COURSE_DEBUG_PERIOD_MS         100U
 
 typedef enum {
     H_COURSE_TASK1_AB = 1,

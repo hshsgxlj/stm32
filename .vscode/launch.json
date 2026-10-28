@@ -1,0 +1,30 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        
+        {
+            "name": "STM32: OpenOCD CMSIS-DAP (wireless)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/Debug/stm32.elf",
+            "servertype": "openocd",
+            "serverpath": "${env:LOCALAPPDATA}/Programs/OpenOCD/xpack-openocd-0.12.0-7/bin/openocd.exe",
+            "configFiles": [
+                "interface/cmsis-dap.cfg",
+                "target/stm32f1x.cfg"
+            ],
+            "searchDir": [
+                "${env:LOCALAPPDATA}/Programs/OpenOCD/xpack-openocd-0.12.0-7/openocd/scripts"
+            ],
+            "gdbPath": "${env:LOCALAPPDATA}/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin/arm-none-eabi-gdb.exe",
+            "armToolchainPath": "${env:LOCALAPPDATA}/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/bin",
+            "openOCDLaunchCommands": [
+                "transport select swd",
+                "adapter speed 2000"
+            ],
+            "runToEntryPoint": "main",
+            "preLaunchTask": "Build STM32 Debug"
+        }
+    ]
+}

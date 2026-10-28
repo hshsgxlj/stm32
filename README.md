@@ -234,13 +234,20 @@ OLED 的常规显示包括：
 - 第三行：相对任务启动航向 `Y` 和当前航向修正量 `C`；
 - 第四行：任务阶段、运行状态或错误代码。
 
-将 `h_course.h` 中的 `H_COURSE_DEBUG` 改为 `1`，可通过 USART1 输出传感器、节点、航向、速度和 PWM 信息。FireWater 数据行使用逗号分隔并以 `\r\n` 结束，例如：
+调试固件默认开启 USART1 遥测，115200、8N1，每 100 ms 输出一行 CSV。字段包括运行时间、任务与状态、节点计数、P1–P4、左右轮编码器转速、轮速估算、相对任务起点的 `Y` 偏航角、目标航向误差和 IMU 有效标志。转速和角度以 0.1 为单位输出；车速估算单位为 mm/s。循迹传感器值 `0` 表示黑线，`1` 表示白底。
 
 ```text
-120,118,121\r\n
+time_ms,task,state,node,P1,P2,P3,P4,left_rpm_x10,right_rpm_x10,speed_mm_s_est,Y_deg_x10,Yerr_deg_x10,imu_ok
+1500,1,1,0,1,0,1,1,120,118,36,12,0,1
 ```
 
-在 VOFA+ 中选择对应串口和 FireWater 协议即可观察多通道曲线。串口助手只适合检查文本和数值是否持续输出；要观察波形，应确认端口、波特率、协议和通道均已启用。
+`state` 数值依次表示待机、循迹运行、直线航向保持、完成、停止、故障。`tools/capture_telemetry.ps1` 可把串口数据持续保存到 `telemetry_logs` 目录：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\capture_telemetry.ps1 -PortName COM9
+```
+
+USART1 信号为 PA9-TX、PA10-RX。可通过主板板载 CH9102F 的 USB 串口采集；若使用调试器的 COM 口作为串口桥，需要将 PA9-TX 接到桥接器 RX、共地，并使用对应 COM 口。CMSIS-DAP 的 SWD 下载接口本身是有线调试，不提供无线遥测；无线采集需另接 Wi-Fi 或蓝牙串口模块。
 
 ## 9. 安全测试顺序
 

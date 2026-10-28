@@ -55,6 +55,9 @@ static uint32_t course_last_node_tick;
 static uint32_t course_node_candidate_tick;
 static uint32_t course_lost_line_tick;
 static uint32_t course_last_debug_tick;
+#if H_COURSE_DEBUG
+static uint8_t course_debug_header_sent;
+#endif
 static uint32_t task2_edge_candidate_tick;
 static uint8_t task2_curve_line_seen;
 static float task2_curve_start_mm;
@@ -179,16 +182,6 @@ static int16_t yaw_error_x10(int16_t target, int16_t current)
     while (error < -1800) error += 3600;
     return (int16_t)error;
 }
-
-#if H_COURSE_DEBUG
-static int16_t yaw_relative_x10(void)
-{
-    /* The DMP yaw is an arbitrary absolute heading.  Only the change from
-     * the stationary launch heading is useful for straight-line control. */
-    if (yaw_ready == 0U) return 0;
-    return yaw_error_x10(current_yaw_x10, target_yaw_x10);
-}
-#endif
 
 static int16_t task_start_yaw_relative_x10(void)
 {
@@ -1068,32 +1061,46 @@ static void control_line(uint32_t now, uint8_t blacks,
 static void debug_output(uint32_t now)
 {
 #if H_COURSE_DEBUG
-    if ((now - course_last_debug_tick) >= 100U) {
-        uint8_t expected = 0U;
-        if (course_node_count < course_route.length) expected = course_route.nodes[course_node_count];
-        if (course_task == H_COURSE_TASK1_AB) {
-            printf("H1,P=%u%u%u%u,L=%d,R=%d\r\n",
-                   (unsigned)last_track.p1,
-                   (unsigned)last_track.p2,
-                   (unsigned)last_track.p3,
-                   (unsigned)last_track.p4,
-                   (int)last_left_pwm,
-                   (int)last_right_pwm);
-        } else {
-            printf("H,T=%u,S=%u,N=%u,E=%u,P=%u%u%u%u,Y=%d,YE=%d,L=%d,R=%d\r\n",
-                   (unsigned)course_task,
-                   (unsigned)course_state,
-                   (unsigned)course_node_count,
-                   (unsigned)expected,
-                   (unsigned)last_track.p1,
-                   (unsigned)last_track.p2,
-                   (unsigned)last_track.p3,
-                   (unsigned)last_track.p4,
-                   (int)yaw_relative_x10(),
-                   (int)yaw_error_x10(target_yaw_x10, current_yaw_x10),
-                   (int)last_left_pwm,
-                   (int)last_right_pwm);
+    if ((now - course_last_debug_tick) >= H_COURSE_DEBUG_PERIOD_MS) {
+        /* Motor A is the physical right wheel; Motor B is the physical left. */
+        int32_t left_rpm_x10 = (int32_t)(sync_right_filt * 10.0f);
+        int32_t right_rpm_x10 = (int32_t)(sync_left_filt * 10.0f);
+        int32_t speed_mm_s_est = (int32_t)(
+            (0.5f * (sync_left_filt + sync_right_filt) *
+             H_COURSE_TASK3_WHEEL_CIRC_MM / 60.0f));
+
+        if (course_debug_header_sent == 0U) {
+            printf("time_ms,task,state,node,lap,leg,phase,P1,P2,P3,P4,left_rpm_x10,"
+                   "right_rpm_x10,speed_mm_s_est,Y_deg_x10,Yerr_deg_x10,imu_ok\r\n");
+            course_debug_header_sent = 1U;
         }
+
+        /* lap:任务4 当前圈数(其他任务为 0);leg:任务3/4 当前段
+         * (0=AC,1=CB,2=BD,3=DA,其他任务为 0);phase:任务2 为
+         * task2_phase(0=AB,1=BC,2=CD,3=DA),任务3/4 为 task3_phase
+         * (0 出发对齐,1 静止确认,2 斜线,3 顶点刹车,4 顶点转向,
+         *  5 捕捉,6 弧线,7 终点刹车,8 出弯对齐,9 出弯静止,
+         *  10 完成,11 故障) */
+        printf("%lu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%ld,%ld,%ld,%d,%d,%u\r\n",
+               (unsigned long)now,
+               (unsigned)course_task,
+               (unsigned)course_state,
+               (unsigned)course_node_count,
+               (unsigned)((course_task == H_COURSE_TASK4_FOUR_LAPS) ? task4_lap : 0U),
+               (unsigned)(((course_task == H_COURSE_TASK3_ACBDA) ||
+                           (course_task == H_COURSE_TASK4_FOUR_LAPS)) ? task3_leg : 0U),
+               (unsigned)((course_task == H_COURSE_TASK2_ABCD) ?
+                          (unsigned)task2_phase : (unsigned)task3_phase),
+               (unsigned)last_track.p1,
+               (unsigned)last_track.p2,
+               (unsigned)last_track.p3,
+               (unsigned)last_track.p4,
+               (long)left_rpm_x10,
+               (long)right_rpm_x10,
+               (long)speed_mm_s_est,
+               (int)task_start_yaw_relative_x10(),
+               (int)yaw_error_x10(target_yaw_x10, current_yaw_x10),
+               (unsigned)((yaw_ready != 0U) && (yaw_sample_valid != 0U)));
         course_last_debug_tick = now;
     }
 #else
@@ -1237,17 +1244,18 @@ void HCourse_PeriodicTask(void)
      * completes at power-up + 20 s, not after the launch key press. */
     update_yaw();
     buzzer_update(now);
+    TRACK_Read(&last_track);
+    sync_tick();
 
     if ((course_state == H_COURSE_STATE_IDLE) ||
         (course_state == H_COURSE_STATE_FINISHED) ||
         (course_state == H_COURSE_STATE_STOPPED) ||
         (course_state == H_COURSE_STATE_FAULT)) {
+        debug_output(now);
         return;
     }
 
-    TRACK_Read(&last_track);
     blacks = black_count(&last_track);
-    sync_tick();
 
     /* H题任务一：开环直行(固定 PWM),任意一路检测到黑线后立即停车。 */
     if (course_task == H_COURSE_TASK1_AB) {

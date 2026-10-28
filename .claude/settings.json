@@ -2,7 +2,26 @@
   "permissions": {
     "allow": [
       "Bash(cd \"/c/Users/hshsgxlj/Desktop/2024电赛小车/stm32/stm32\" && python gen_course_doc.py)",
-      "Read(//c/Users/hshsgxlj/Desktop/2024电赛小车/stm32/stm32/**)"
+      "Read(//c/Users/hshsgxlj/Desktop/2024电赛小车/stm32/stm32/**)",
+      "Bash(ls -la /e/ 2>/dev/null | head -50; echo ---; ls /e/ 2>/dev/null | head -50)",
+      "Read(//e//**)",
+      "Read(//c/Users/hshsgxlj/Desktop/2024电赛小车/**)",
+      "Bash(cd /c/Users/hshsgxlj/Desktop/2024电赛小车 && python -c \" *)",
+      "Bash(rm -f /c/Users/hshsgxlj/Desktop/2024电赛小车/_sch_page3.png /c/Users/hshsgxlj/Desktop/2024电赛小车/_sch_p3_zoom.png /c/Users/hshsgxlj/Desktop/2024电赛小车/_sch_p3_bt.png)",
+      "Bash(arm-none-eabi-gcc --version)",
+      "Bash(ls /c/Users/hshsgxlj/Desktop/2024电赛小车/stm32/stm32/ | head -30; echo ---; ls /c/Users/hshsgxlj/Desktop/2024电赛小车/stm32/stm32/cmake 2>/dev/null)",
+      "Read(//c/Users/hshsgxlj/Desktop/2024电赛小车/stm32/stm32//**)",
+      "Read(//c/Users/hshsgxlj/Desktop/2024电赛小车/stm32/stm32/cmake/**)",
+      "Read(//c/Users/hshsgxlj/Desktop/2024电赛小车/stm32/stm32/build/**)",
+      "Bash(cmake --version)",
+      "Bash(ninja --version)",
+      "Bash(cmake --build --preset Debug)",
+      "Bash(cd \"/c/Users/hshsgxlj/Desktop/2024电赛小车/stm32/stm32/tools\" *)",
+      "Read(//c/Users/hshsgxlj/Desktop/2024电赛小车/stm32/stm32/tools/**)",
+      "Bash(cd \"/c/Users/hshsgxlj/Desktop/2024电赛小车/stm32/stm32/tools\" && python -c \"import matplotlib; print\\(matplotlib.__version__\\)\" 2>&1)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\hshsgxlj\\Desktop\\2024电赛小车"
     ]
   }
 }

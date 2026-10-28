@@ -10,18 +10,20 @@
 #include "main.h"
 #include "oled.h"
 
-/* huart1 is generated and defined in main.c. */
-extern UART_HandleTypeDef huart1;
+/* huart2 is generated and defined in main.c; telemetry goes out on PA2 (USART2_TX)
+ * so the wireless DAP probe can bridge it to the PC without touching the
+ * onboard CH9102F Type-C serial. */
+extern UART_HandleTypeDef huart2;
 
 /**
  * @brief  printf 输出钩子函数
  * @param  ch: 要发送的字符
  * @retval 发送的字符
- * @note   由 GCC/CMake syscalls 调用，实现 printf 重定向到 USART1
+ * @note   由 GCC/CMake syscalls 调用，实现 printf 重定向到 USART2
  */
 int __io_putchar(int ch) {
   uint8_t data = (uint8_t)ch;
-  (void)HAL_UART_Transmit(&huart1, &data, 1U, 100U);
+  (void)HAL_UART_Transmit(&huart2, &data, 1U, 100U);
   return ch;
 }
 
