@@ -16,6 +16,8 @@ typedef struct {
 typedef enum {
     H_COURSE_TASK2_AB_STRAIGHT = 0,
     H_COURSE_TASK2_BC_LINE,
+    H_COURSE_TASK2_EXIT_ALIGN,    /* 出弯后:先刹停再原地摆正到 C-D 目标 */
+    H_COURSE_TASK2_EXIT_SETTLE,   /* 摆正后等车轮停稳,再进 C-D 直线 */
     H_COURSE_TASK2_CD_STRAIGHT,
     H_COURSE_TASK2_DA_LINE
 } HCourse_Task2Phase;
@@ -59,6 +61,8 @@ static uint32_t course_last_debug_tick;
 static uint8_t course_debug_header_sent;
 #endif
 static uint32_t task2_edge_candidate_tick;
+static uint32_t task2_exit_tick;   /* 出弯摆正/停稳阶段的计时基准 */
+static uint8_t task2_exit_braked;  /* 摆正前刹停只做一次;开始转向后不再管轮速 */
 static uint8_t task2_curve_line_seen;
 static float task2_curve_start_mm;
 static uint32_t buzzer_off_tick;
@@ -1101,11 +1105,11 @@ static void debug_output(uint32_t now)
 
         /* lap:任务4 当前圈数(其他任务为 0);leg:任务3/4 当前段
          * (0=AC,1=CB,2=BD,3=DA,其他任务为 0);phase:任务2 为
-         * task2_phase(0=AB,1=BC,2=CD,3=DA),任务3/4 为 task3_phase
+         * task2_phase(0=AB,1=BC,2=出弯摆正,3=出弯静止,4=CD,5=DA),
+         * 任务3/4 为 task3_phase
          * (0 出发对齐,1 静止确认,2 斜线,3 顶点刹车,4 顶点转向,
          *  5 捕捉,6 弧线,7 终点刹车,8 出弯对齐,9 出弯静止,
-         *  10 完成,11 故障) */
-        printf("%lu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%ld,%ld,%ld,%d,%d,%u\r\n",
+         *  10 完成,11 故障) */        printf("%lu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%ld,%ld,%ld,%d,%d,%u\r\n",
                (unsigned long)now,
                (unsigned)course_task,
                (unsigned)course_state,
@@ -1347,13 +1351,17 @@ void HCourse_PeriodicTask(void)
             buzzer_beep(now);
             yaw_retarget();
             /* C-D 与启动时 A-B 方向相反。不能以弯道出口的当前角度
-             * 作为目标,否则循迹摆动造成的随机出弯角会被带进直线。 */
+             * 作为目标,否则循迹摆动造成的随机出弯角会被带进直线。
+             * 与任务3/4 同款:先刹停、原地摆正到目标,再进直线。 */
             target_yaw_x10 = task3_wrap_x10((int32_t)task2_start_heading_x10 +
                                             1800 +
                                             (int32_t)H_COURSE_TASK2_CD_TRIM_X10);
-            task2_curve_line_seen = 0U;
-            task2_edge_candidate_tick = 0U;
-            task2_phase = H_COURSE_TASK2_CD_STRAIGHT;
+            task3_turn_target_x10 = target_yaw_x10;
+            task3_edge_tick = 0U;
+            task2_exit_tick = now;
+            task2_exit_braked = 0U;
+            sync_reset();
+            task2_phase = H_COURSE_TASK2_EXIT_ALIGN;
         } else if ((task2_phase == H_COURSE_TASK2_DA_LINE) &&
                    (task2_all_white_event(now, blacks) != 0U)) {
             HCourse_Stop();
@@ -1384,8 +1392,42 @@ void HCourse_PeriodicTask(void)
                 last_right_pwm = sync_right_pwm();
                 MOTOR_SetSpeeds(last_left_pwm, last_right_pwm);
             }
+        } else if (task2_phase == H_COURSE_TASK2_EXIT_ALIGN) {
+            /* 出弯摆正:先刹停(只做一次,轮速降到阈值就标记完成,
+             * 之后即使转向把轮速拉起来也不再打断),再复用任务3/4
+             * 的单轮原地转向到 C-D 目标。陀螺仪不可用或超时直接进直线。 */
+            course_state = H_COURSE_STATE_STRAIGHT_HOLD;
+            if ((yaw_sample_valid == 0U) ||
+                ((now - task2_exit_tick) >= H_COURSE_TASK3_ALIGN_TIMEOUT_MS)) {
+                task2_phase = H_COURSE_TASK2_CD_STRAIGHT;
+            } else if (task2_exit_braked == 0U) {
+                MOTOR_SetSpeeds(0, 0);
+                last_left_pwm = 0;
+                last_right_pwm = 0;
+                if (((int32_t)sync_left_filt <= H_COURSE_TASK3_SETTLE_RPM) &&
+                    ((int32_t)sync_right_filt <= H_COURSE_TASK3_SETTLE_RPM)) {
+                    task2_exit_braked = 1U;
+                    task3_edge_tick = 0U;   /* 摆正去抖从转向开始算 */
+                }
+            } else if (task3_turn_control(now) != 0U) {
+                sync_reset();
+                task2_exit_tick = now;
+                task2_phase = H_COURSE_TASK2_EXIT_SETTLE;
+            }
+        } else if (task2_phase == H_COURSE_TASK2_EXIT_SETTLE) {
+            course_state = H_COURSE_STATE_STRAIGHT_HOLD;
+            MOTOR_SetSpeeds(0, 0);
+            last_left_pwm = 0;
+            last_right_pwm = 0;
+            if (((now - task2_exit_tick) >= H_COURSE_TASK3_SETTLE_MS) &&
+                ((int32_t)sync_left_filt <= H_COURSE_TASK3_SETTLE_RPM) &&
+                ((int32_t)sync_right_filt <= H_COURSE_TASK3_SETTLE_RPM)) {
+                task2_phase = H_COURSE_TASK2_CD_STRAIGHT;
+            }
         } else {
-            control_line(now, blacks, base_left, base_right);
+            /* 弯道(BC/DA):用独立的弯道基准速度,不跟直线 STRAIGHT_PWM 联动 */
+            control_line(now, blacks,
+                         H_COURSE_TASK2_CURVE_PWM, H_COURSE_TASK2_CURVE_PWM);
         }
     } else if ((course_task == H_COURSE_TASK3_ACBDA) ||
                (course_task == H_COURSE_TASK4_FOUR_LAPS)) {
@@ -1448,6 +1490,10 @@ void HCourse_UpdateOLED(void)
             state_text = "H2 A-B ";
         } else if (task2_phase == H_COURSE_TASK2_BC_LINE) {
             state_text = "H2 B-C ";
+        } else if (task2_phase == H_COURSE_TASK2_EXIT_ALIGN) {
+            state_text = "H2 TURN";
+        } else if (task2_phase == H_COURSE_TASK2_EXIT_SETTLE) {
+            state_text = "H2 WAIT";
         } else if (task2_phase == H_COURSE_TASK2_CD_STRAIGHT) {
             state_text = "H2 C-D ";
         } else {

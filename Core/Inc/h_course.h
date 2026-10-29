@@ -80,6 +80,10 @@
 /* 四路全黑(压到横线/粗线)时的固定减速 PWM。 */
 #define H_COURSE_ALL_BLACK_SPEED         100
 
+/* 任务2 弯道(BC/DA)循迹基准 PWM:与直线速度解耦,
+ * 直线段用 STRAIGHT_PWM,弯道用此值。弯道飞出/压不住线优先调它。 */
+#define H_COURSE_TASK2_CURVE_PWM         180
+
 /* 丢线保持总时长:全白超过间隙保持期后进入 yaw 直行找线,
  * 超过 1000ms 还找不到线就停车。 */
 #define H_COURSE_LOST_LINE_HOLD_MS       1000U
@@ -179,9 +183,9 @@
  * 先全部设 0;按每圈实际跑偏逐格微调,方向约定与全局微调一致。 */
 #define H_COURSE_TASK4_LAP_TRIM_X10 \
     { {   0,   0 }, \
-      {   0,   0 }, \
-      {   0,   0 }, \
-      {   0,   0 } }
+      {   -5,   -5 }, \
+      {   -10,   -10 }, \
+      {   -15,   15 } }
 
 /* 轮子周长(mm/圈),用于编码器计距。
  * 实车标定:编码器计 1000mm 实际跑 1090mm → 204.2 × 1.09 ≈ 222.6 */
@@ -209,7 +213,7 @@
 
 /* 任务4专用:斜线超过预计长度多少毫米后进入救援摆正。
  * 数值越小,越早摆正;建议从 20mm 开始现场调整。 */
-#define H_COURSE_TASK4_RESCUE_TRIGGER_MM  -90.0f
+#define H_COURSE_TASK4_RESCUE_TRIGGER_MM  -100.0f
 
 /* 角度容差(度×10):转向到位 3°,斜线航向 20°。 */
 #define H_COURSE_TASK3_ALIGN_TOL_X10      30
