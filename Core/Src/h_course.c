@@ -729,9 +729,9 @@ static void control_task3(uint32_t now, uint8_t blacks,
             target_yaw_x10 = target;
             line_valid = task3_line_valid();
             if ((line_valid != 0U) && (task3_stable(1, now) != 0U)) {
-                /* 找回有效黑线后,沿原有任务3流程进入顶点刹车。 */
+                /* 找回有效黑线后,沿原有任务3流程进入顶点刹车。
+                 * 不再响铃:救援触发时已经提示过,这里被其替代。 */
                 course_node_count = (task3_leg == 0U) ? 1U : 3U;
-                buzzer_beep(now);
                 task3_enter_phase(H_COURSE_TASK3_VERTEX_BRAKE, now);
                 MOTOR_SetSpeeds(0, 0);
                 return;
@@ -774,8 +774,11 @@ static void control_task3(uint32_t now, uint8_t blacks,
             (task3_diag_rescue == 0U) &&
             (progress > H_COURSE_TASK3_DIAG_MM +
                        H_COURSE_TASK4_RESCUE_TRIGGER_MM)) {
-            /* 超距后先进入摆正阶段,不要继续保持斜线航向。 */
+            /* 超距后先进入摆正阶段,不要继续保持斜线航向。
+             * 触发时声光提示一次;救援找线成功后进入下一阶段
+             * 不再重复提示(由本次提示替代)。 */
             task3_diag_rescue = 1U;
+            buzzer_beep(now);
             task3_turn_target_x10 = task4_rescue_heading_x10();
             task3_phase_tick = now;
             task3_edge_tick = 0U;
