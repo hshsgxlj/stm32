@@ -50,7 +50,7 @@
 /* 线尾确认时间(任务2 的 C/A 点、任务3/4 的弧线结束):全白持续
  * 此时间才判定"黑线走完"。传感器间隙的短暂全白不会误触发;
  * 判得太慢可调小。 */
-#define H_COURSE_TASK2_EDGE_CONFIRM_MS   450U
+#define H_COURSE_TASK2_EDGE_CONFIRM_MS   350U
 
 /* 弯道至少前进这段距离后才允许用“持续全白”判断 C/A 线尾。
  * 防止刚离开 B/D 横线或传感器短暂跨过线缝时提前切换阶段。 */
@@ -81,8 +81,11 @@
 #define H_COURSE_ALL_BLACK_SPEED         100
 
 /* 任务2 弯道(BC/DA)循迹基准 PWM:与直线速度解耦,
- * 直线段用 STRAIGHT_PWM,弯道用此值。弯道飞出/压不住线优先调它。 */
-#define H_COURSE_TASK2_CURVE_PWM         180
+ * 直线段用 STRAIGHT_PWM,弯道主体用此值;弯道末尾降回
+ * CURVE_EXIT_PWM 再出弯(出弯行为保持已验证的速度)。
+ * 弯道飞出/压不住线优先调它。 */
+#define H_COURSE_TASK2_CURVE_PWM         200
+#define H_COURSE_TASK2_CURVE_EXIT_PWM    180
 
 /* 丢线保持总时长:全白超过间隙保持期后进入 yaw 直行找线,
  * 超过 1000ms 还找不到线就停车。 */
@@ -124,7 +127,7 @@
 /* 任务3/4弯道入口专用:最外侧 P1/P4 刚压黑时更快打方向。
  * 只影响任务3/4,任务2仍使用上面的通用参数。 */
 #define H_COURSE_TASK34_RECOVER_DIFF      85
-#define H_COURSE_TASK34_RECOVER_SPEED_PCT 70
+#define H_COURSE_TASK34_RECOVER_SPEED_PCT 80
 #define H_COURSE_TASK34_RECOVER_BRAKE_MS  10U
 
 /* 恢复模式下全白(线在传感器间隙/刚脱离最外侧)时,继续按恢复方向
@@ -141,20 +144,23 @@
 #define H_COURSE_ENABLE_YAW_HOLD         1U
 
 /* 航向修正 PID(把车头掰回目标航向):
- * KP 3.0:偏 1 度给 3 PWM 差速(之前 1.5 太弱,车带着 1.5° 稳态偏走)。
- *       直行左右摆=太大;走不直=太小
- * KI 0.0:积分(暂时关闭)
- * KD 0.08:微分,抑制摆动 */
-#define H_COURSE_YAW_KP                  3.0f
-#define H_COURSE_YAW_KI                  0.0f
-#define H_COURSE_YAW_KD                  0.08f
+ * KP 8.0:偏 1 度给 8 PWM 差速。实测左轮天然快右轮 ~60 RPM
+ *        (≈20+ PWM 等效,280 PWM 下更大),KP 太小顶不住机械右偏,
+ *        车会一路右拐;直行左右摆=太大,走不直=太小
+ * KI 1.0:积分,快速累积抵消机械不对称所需的持续差速
+ * KD 0.1:微分,抑制加大 KP 后可能出现的摆动 */
+#define H_COURSE_YAW_KP                  8.0f
+#define H_COURSE_YAW_KI                  1.0f
+#define H_COURSE_YAW_KD                  0.1f
 
-/* 航向积分限幅(KI 启用时才有效)。 */
+/* 航向积分限幅(KI 启用时才有效)。KI 1.0 × 20 = 最多 20 PWM 持续差速,
+ * 足够抵消实测机械不对称(~20 PWM 等效)。 */
 #define H_COURSE_YAW_INTEGRAL_LIMIT      20.0f
 
-/* 航向修正限幅:直行段左右轮差速最多 ±30 PWM(约基准的 20%,
- * 小步慢纠,和 Sunward 的"温和航向保持"一致)。 */
-#define H_COURSE_YAW_CORRECTION_LIMIT    30
+/* 航向修正限幅:直行段左右轮差速最多 ±60 PWM。
+ * 280 PWM 高速下机械不对称需要 ~25 PWM 差速才能顶平,
+ * 太小(40)会出现"读数一直偏、车一直拐"的现象。 */
+#define H_COURSE_YAW_CORRECTION_LIMIT    60
 
 /* 航向修正方向:本车正 yaw = 左转(标准约定),符号取正。
  * 直行越修越偏(正反馈)就把这个符号反过来。 */
@@ -183,9 +189,9 @@
  * 先全部设 0;按每圈实际跑偏逐格微调,方向约定与全局微调一致。 */
 #define H_COURSE_TASK4_LAP_TRIM_X10 \
     { {   0,   0 }, \
-      {   -5,   -5 }, \
-      {   -10,   -5 }, \
-      {   -15,   -5 } }
+      {   0,   0 }, \
+      {   0,   5 }, \
+      {   0,   5} }
 
 /* 轮子周长(mm/圈),用于编码器计距。
  * 实车标定:编码器计 1000mm 实际跑 1090mm → 204.2 × 1.09 ≈ 222.6 */
@@ -193,16 +199,32 @@
 
 /* 各段速度(基准 PWM):斜线、弧线、顶点转向(单轮)、捕捉短驶。
  * 转向单轮速度大 → 惯性大 → 容易转过窗口;角度偏大就先降它。 */
-#define H_COURSE_TASK3_DIAG_PWM           200
-#define H_COURSE_TASK3_ARC_PWM            145
-#define H_COURSE_TASK3_TURN_PWM           110
-#define H_COURSE_TASK3_TURN_FINE_PWM      75
-#define H_COURSE_TASK3_CAPTURE_PWM        60
+#define H_COURSE_TASK3_DIAG_PWM           250
+#define H_COURSE_TASK3_ARC_PWM            190
+#define H_COURSE_TASK3_TURN_PWM           140
+#define H_COURSE_TASK3_TURN_FINE_PWM      90
+#define H_COURSE_TASK3_CAPTURE_PWM        80
+
+/* 顶点预减速:斜线最后 PRE_BRAKE_MM 内降到 SLOW_PWM,
+ * 替代全速冲到顶点再猛刹,减少滑行和停稳时间。
+ * 150mm = 高速冲到线头窗口(前 120mm)才开始降速;若顶点冲过头
+ * 或停稳变慢,往 180~200 调回。 */
+#define H_COURSE_TASK3_DIAG_PRE_BRAKE_MM  150.0f
+#define H_COURSE_TASK3_DIAG_SLOW_PWM      130
+
+/* 弧线末尾降速:BC/DA 弧线长约 1250mm(1/4 圆弧,实车微调),
+ * 最后 ARC_TAIL_MM 内降到 ARC_TAIL_PWM(出弯速度),
+ * 弧线主体全速跑,出弯滚动摆正仍以已验证的速度进行。 */
+#define H_COURSE_TASK3_ARC_LENGTH_MM      1250.0f
+#define H_COURSE_TASK3_ARC_TAIL_MM        250.0f
+#define H_COURSE_TASK3_ARC_TAIL_PWM       170
 
 /* 任务4 的第二个弯需要更大的单轮启动力;只作用于任务4,不改变任务3。 */
-#define H_COURSE_TASK4_TURN_PWM           110
+#define H_COURSE_TASK4_TURN_PWM           140
 #define H_COURSE_TASK4_ALIGN_TIMEOUT_MS   6000U
 #define H_COURSE_TASK4_RESCUE_PWM         80
+/* 救援摆正转向专用速度(单轮):比常规转向更快,快速找线。 */
+#define H_COURSE_TASK4_RESCUE_TURN_PWM    170
 
 /* 任务3/4 B点出弯、驶离黑线后的最终车头目标(相对启动方向,度×10)。
  * 只作用于出弯摆正阶段,不改变 B-D 斜线的几何航向目标。 */
@@ -215,8 +237,9 @@
  * 数值越小,越早摆正;建议从 20mm 开始现场调整。 */
 #define H_COURSE_TASK4_RESCUE_TRIGGER_MM  -100.0f
 
-/* 角度容差(度×10):转向到位 3°,斜线航向 20°。 */
-#define H_COURSE_TASK3_ALIGN_TOL_X10      30
+/* 角度容差(度×10):转向到位 4°(提速后放宽,省掉最后几度蜗牛爬),
+ * 斜线航向 20°。 */
+#define H_COURSE_TASK3_ALIGN_TOL_X10      40
 #define H_COURSE_TASK3_DIAG_TOL_X10       200
 
 /* 航向误差必须连续超限才报 E3，过滤单次陀螺仪跳变和阶段切换瞬态。 */
@@ -224,8 +247,8 @@
 
 /* 时序:确认去抖、顶点制动后静止判据(轮速 RPM)、各阶段超时。 */
 #define H_COURSE_TASK3_DEBOUNCE_MS        30U
-#define H_COURSE_TASK3_SETTLE_MS          200U
-#define H_COURSE_TASK3_SETTLE_RPM         3
+#define H_COURSE_TASK3_SETTLE_MS          150U
+#define H_COURSE_TASK3_SETTLE_RPM         5
 #define H_COURSE_TASK3_ALIGN_TIMEOUT_MS   6000U
 #define H_COURSE_TASK3_CAPTURE_TIMEOUT_MS 2000U
 
@@ -235,8 +258,8 @@
 
 /* 直行段:MOTOR_A(物理右轮)固定 PWM(基准),MOTOR_B(物理左轮)
  * 用 PID 跟踪右轮实际转速。两个 PWM 常量是 B 轮修正的基准值。 */
-#define H_COURSE_STRAIGHT_PWM_LEFT       200
-#define H_COURSE_STRAIGHT_PWM_RIGHT      200
+#define H_COURSE_STRAIGHT_PWM_LEFT       280
+#define H_COURSE_STRAIGHT_PWM_RIGHT      280
 
 /* 左轮同步 PID(误差 = 右轮(A)实际转速 + 补偿 − 左轮(B)实际转速,
  * 单位 RPM):KP:每 1 RPM 差给多少 PWM;KI:消除持续偏差(左右轮阻力差异)。

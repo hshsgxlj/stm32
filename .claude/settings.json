@@ -18,7 +18,8 @@
       "Bash(cmake --build --preset Debug)",
       "Bash(cd \"/c/Users/hshsgxlj/Desktop/2024电赛小车/stm32/stm32/tools\" *)",
       "Read(//c/Users/hshsgxlj/Desktop/2024电赛小车/stm32/stm32/tools/**)",
-      "Bash(cd \"/c/Users/hshsgxlj/Desktop/2024电赛小车/stm32/stm32/tools\" && python -c \"import matplotlib; print\\(matplotlib.__version__\\)\" 2>&1)"
+      "Bash(cd \"/c/Users/hshsgxlj/Desktop/2024电赛小车/stm32/stm32/tools\" && python -c \"import matplotlib; print\\(matplotlib.__version__\\)\" 2>&1)",
+      "Bash(cd \"/c/Users/hshsgxlj/Desktop/2024电赛小车/stm32/stm32\" && cmake --build --preset Debug 2>&1 | tail -3)"
     ],
     "additionalDirectories": [
       "C:\\Users\\hshsgxlj\\Desktop\\2024电赛小车"
